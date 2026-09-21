@@ -59,10 +59,11 @@
     line-height: 1.42; word-wrap: break-word; white-space: pre-wrap;
     box-shadow: 0 1px 1px rgba(0,0,0,0.04);
   }
-  .row.them .bubble { background: var(--bubble-them); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .row.them .bubble { background: var(--bubble-them); border: 1px solid var(--line); border-left: 3px solid var(--sender-color, var(--line)); border-bottom-left-radius: 4px; }
   .row.me .bubble { background: var(--bubble-me); color: var(--bubble-me-ink); border-bottom-right-radius: 4px; }
   .meta { font-family: ui-monospace, monospace; font-size: 10px; color: var(--ink-dim); margin: 10px 4px 3px; }
   .meta.me { text-align: right; }
+  .meta .sender { color: var(--sender-color, var(--ink-dim)); font-weight: 600; }
 
   footer {
     position: sticky; bottom: env(safe-area-inset-bottom, 0px); background: var(--bg);
@@ -116,7 +117,7 @@
 <div class="overlay" id="setupOverlay">
   <div class="card" id="setupCard">
     <h2>Start a wire</h2>
-    <p>Pick a name. Then share the link that appears with your friend — whoever opens it lands in the same room, no account needed.</p>
+    <p>Pick a name. Then share the link that appears — anyone who opens it lands in the same room, no account needed, no limit on how many join.</p>
     <input id="nameInput" type="text" maxlength="24" placeholder="Your name" autocomplete="off">
     <button id="enterBtn">Enter</button>
   </div>
@@ -197,6 +198,17 @@
     try { return decodeURIComponent(titleHeaderValue); } catch (e) { return titleHeaderValue; }
   }
 
+  const SENDER_PALETTE = ['#b5451b', '#3d6b4f', '#3a5a8c', '#8c5a3a', '#7a4d8c', '#4d8c86', '#a6752f'];
+  const senderColors = {};
+  function colorForName(name) {
+    if (senderColors[name]) return senderColors[name];
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    const color = SENDER_PALETTE[hash % SENDER_PALETTE.length];
+    senderColors[name] = color;
+    return color;
+  }
+
   function renderMessage(msg) {
     if (!msg || !msg.id || seen.has(msg.id)) return;
     if (msg.event !== 'message') return;
@@ -211,11 +223,21 @@
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = msg.message || '';
+    if (!isMe) bubble.style.setProperty('--sender-color', colorForName(senderName));
     row.appendChild(bubble);
 
     const meta = document.createElement('div');
     meta.className = 'meta' + (isMe ? ' me' : '');
-    meta.textContent = (isMe ? 'you' : senderName) + ' · ' + fmtTime(msg.time);
+    if (isMe) {
+      meta.textContent = 'you · ' + fmtTime(msg.time);
+    } else {
+      const senderSpan = document.createElement('span');
+      senderSpan.className = 'sender';
+      senderSpan.style.setProperty('--sender-color', colorForName(senderName));
+      senderSpan.textContent = senderName;
+      meta.appendChild(senderSpan);
+      meta.appendChild(document.createTextNode(' · ' + fmtTime(msg.time)));
+    }
 
     threadEl.appendChild(row);
     threadEl.appendChild(meta);

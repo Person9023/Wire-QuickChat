@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html><!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -175,8 +175,7 @@
   .pinbar.show { display: flex; }
   .pinbar-label { font-family: ui-monospace, monospace; font-size: 10px; color: var(--accent); font-weight: 700; flex-shrink: 0; }
   .pinbar-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--ink-dim); }
-  .row.pinned .bubble { box-shadow: 0 0 0 1px var(--accent); }
-  .pinmark { font-family: ui-monospace, monospace; font-size: 9px; color: var(--accent); margin-top: 3px; }
+  .row.pinned .bubble { box-shadow: 0 0 0 2px var(--accent); }
   .message-menu {
     position: fixed; z-index: 30; display: none; min-width: 125px; padding: 5px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
@@ -240,6 +239,7 @@
     <h1 id="chatBack" title="Back to your rooms">Wire</h1>
     <div class="right">
       <span class="status" id="status">—</span>
+      <button class="iconbtn" id="pinModeBtn">pin message</button>
       <button class="iconbtn" id="shareBtn">copy link</button>
     </div>
   </header>
@@ -283,8 +283,8 @@
   const roomsCol = firestoreDb.collection('wire-rooms');
   const FieldValue = firebase.firestore.FieldValue;
   const IMAGE_BYTE_BUDGET = 700000; // encoded-image ceiling; safely under Firestore's 1MB document cap
-  const CHUNK_BUDGET = 700000; // per-chunk budget for larger files split across documents
-  const MAX_AUDIO_BYTES = 8 * 1024 * 1024; // raw file cap before base64 overhead
+  const CHUNK_BUDGET = 450000; // keep chunk documents comfortably below Firestore's 1MB document limit
+  const MAX_AUDIO_BYTES = 16 * 1024 * 1024; // raw upload cap before compression
 
   async function hashPassword(pw) {
     const enc = new TextEncoder().encode(pw);
@@ -568,6 +568,8 @@
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
   const shareBtn = document.getElementById('shareBtn');
+  const pinModeBtn = document.getElementById('pinModeBtn');
+  let pinMode = false;
 
   let topic = null;
   let roomName = '';
@@ -621,7 +623,14 @@
   }
 
   function getPinnedIds() {
-    return Array.from(messageData.entries()).filter(([id, d]) => d.pinned).map(([id]) => id);
+    return Array.from(messageData.entries())
+      .filter(([id, d]) => d.pinned)
+      .sort((a, b) => {
+        const ta = messageDate(a[1]);
+        const tb = messageDate(b[1]);
+        return (ta ? ta.getTime() : 0) - (tb ? tb.getTime() : 0);
+      })
+      .map(([id]) => id);
   }
 
   function scrollToMessage(id) {
@@ -634,7 +643,9 @@
   function updatePinBar() {
     const pinBar = document.getElementById('pinBar');
     const pinText = document.getElementById('pinBarText');
+
     const pinned = getPinnedIds().filter(id => messageNodes.has(id));
+
     if (!pinned.length) {
       pinBar.classList.remove('show');
       pinBarTargetId = null;
@@ -642,30 +653,42 @@
     }
 
     const mainRect = threadEl.getBoundingClientRect();
-    const viewportCenter = mainRect.top + mainRect.height / 2;
-    const visiblePinned = [];
-    pinned.forEach(id => {
-      const r = messageNodes.get(id).getBoundingClientRect();
-      if (r.bottom >= mainRect.top && r.top <= mainRect.bottom) visiblePinned.push(id);
-    });
 
-    let candidates = pinned;
-    if (visiblePinned.length && pinned.length > visiblePinned.length) {
-      candidates = pinned.filter(id => !visiblePinned.includes(id));
+    // Find the pinned message currently being viewed, or the first pinned
+    // message at/below the top of the viewport. The target is the closest
+    // pinned message that is older than that one.
+    let referenceIndex = -1;
+    for (let i = 0; i < pinned.length; i++) {
+      const rect = messageNodes.get(pinned[i]).getBoundingClientRect();
+      if (rect.bottom >= mainRect.top && rect.top <= mainRect.bottom) {
+        referenceIndex = i;
+        break;
+      }
     }
-    let best = null, bestDist = Infinity;
-    candidates.forEach(id => {
-      const r = messageNodes.get(id).getBoundingClientRect();
-      const dist = Math.abs((r.top + r.bottom) / 2 - viewportCenter);
-      if (dist < bestDist) { bestDist = dist; best = id; }
-    });
-    if (!best) best = pinned[0];
 
-    pinBarTargetId = best;
-    pinText.textContent = messagePreview(messageData.get(best));
+    if (referenceIndex === -1) {
+      for (let i = 0; i < pinned.length; i++) {
+        const rect = messageNodes.get(pinned[i]).getBoundingClientRect();
+        if (rect.top >= mainRect.top) {
+          referenceIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (referenceIndex === -1) referenceIndex = pinned.length;
+
+    // pinned[] is oldest -> youngest, so the previous entry is the
+    // youngest message that is still older than the reference.
+    let targetIndex = referenceIndex - 1;
+    if (targetIndex < 0) targetIndex = pinned.length - 1;
+
+    // If the reference itself is already the oldest, use the youngest pin
+    // as the wrap-around target.
+    pinBarTargetId = pinned[targetIndex];
+    pinText.textContent = messagePreview(messageData.get(pinBarTargetId));
     pinBar.classList.add('show');
   }
-
   async function togglePin(id) {
     const data = messageData.get(id);
     if (!data || !topic) return;
@@ -675,6 +698,20 @@
     } catch (e) {
       setStatus('could not change pin');
     }
+  }
+
+  function setPinMode(enabled) {
+    pinMode = enabled;
+    pinModeBtn.textContent = enabled ? 'cancel pin' : 'pin message';
+    pinModeBtn.style.borderColor = enabled ? 'var(--accent)' : '';
+    pinModeBtn.style.color = enabled ? 'var(--accent)' : '';
+    if (enabled) setStatus('click a message to pin it');
+    else if (topic) setStatus('live');
+  }
+
+  function pinMessageFromMode(id) {
+    setPinMode(false);
+    togglePin(id);
   }
 
   function closeMessageMenu() {
@@ -714,12 +751,6 @@
       const existing = messageNodes.get(id);
       if (existing) {
         existing.classList.toggle('pinned', !!data.pinned);
-        const mark = existing.querySelector('.pinmark');
-        if (mark) mark.remove();
-        if (data.pinned) {
-          const m = document.createElement('div'); m.className = 'pinmark'; m.textContent = 'pinned';
-          existing.appendChild(m);
-        }
       }
       updatePinBar();
       return;
@@ -737,6 +768,15 @@
     const isMe = data.sender === currentUser;
     const row = document.createElement('div');
     row.className = 'row ' + (isMe ? 'me' : 'them');
+    row.classList.toggle('pinned', !!data.pinned);
+    row.dataset.messageId = id;
+    messageNodes.set(id, row);
+    row.addEventListener('click', (e) => {
+      if (!pinMode) return;
+      if (e.target.closest('img')) return;
+      e.preventDefault();
+      pinMessageFromMode(id);
+    });
     const bubble = document.createElement('div');
 
     if (data.type === 'image' && data.imageData) {
@@ -745,7 +785,10 @@
       img.src = data.imageData;
       img.loading = 'lazy';
       img.alt = 'shared image';
-      img.addEventListener('click', () => window.open(data.imageData, '_blank'));
+      img.addEventListener('click', (e) => {
+        if (pinMode) { e.preventDefault(); e.stopPropagation(); pinMessageFromMode(id); return; }
+        window.open(data.imageData, '_blank');
+      });
       bubble.appendChild(img);
     } else if (data.type === 'audio') {
       bubble.className = 'bubble audiobubble';
@@ -753,20 +796,30 @@
       label.className = 'audio-filename';
       label.textContent = data.fileName || 'audio clip';
       bubble.appendChild(label);
+
       const note = document.createElement('div');
       note.className = 'audio-loading';
       note.textContent = 'loading…';
       bubble.appendChild(note);
+
       const audioEl = document.createElement('audio');
       audioEl.controls = true;
-      audioEl.preload = 'none';
+      audioEl.preload = 'metadata';
       audioEl.style.display = 'none';
       bubble.appendChild(audioEl);
-      loadAudioChunks(id).then((dataUrl) => {
+
+      // The message document is created before its audio chunk documents.
+      // Wait until every chunk exists before giving the browser the data URL;
+      // otherwise the player can receive an incomplete/corrupt file.
+      loadAudioChunks(id, data.totalChunks || 0, data.mimeType || 'audio/webm').then((dataUrl) => {
         audioEl.src = dataUrl;
         audioEl.style.display = '';
         note.remove();
-      }).catch(() => { note.textContent = 'failed to load'; });
+        audioEl.load();
+      }).catch((e) => {
+        console.error('audio load failed', e);
+        note.textContent = 'failed to load';
+      });
     } else {
       bubble.className = 'bubble';
       bubble.textContent = data.text || '';
@@ -960,36 +1013,125 @@
     });
   }
 
-  // Larger files (audio) don't fit in one Firestore document, so they're split
-  // into ordered chunk documents under the message and reassembled on playback.
+  // Audio is aggressively converted to mono Opus/WebM in the browser before
+  // it is sent. This is dramatically smaller than storing the original WAV,
+  // FLAC or high-bitrate recording. Chrome/Edge support this conversion natively.
+  // If conversion is unavailable, we fall back to the original file.
+  const AUDIO_BITRATE = 24000; // 24 kbps is plenty for voice/chat audio
+  const AUDIO_SAMPLE_RATE = 24000;
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function compressAudio(file) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx || !window.MediaRecorder) return { blob: file, mimeType: file.type || 'audio/mpeg' };
+
+    let audioCtx = null;
+    let source = null;
+    let stream = null;
+    let recorder = null;
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      audioCtx = new AudioCtx();
+      const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+
+      // Mix every source channel down to mono. This cuts the audio payload
+      // roughly in half before the low-bitrate Opus encoder gets to work.
+      const offline = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * AUDIO_SAMPLE_RATE)), AUDIO_SAMPLE_RATE);
+      source = offline.createBufferSource();
+      source.buffer = decoded;
+      source.connect(offline.destination);
+      source.start(0);
+      const monoBuffer = await offline.startRendering();
+
+      // Feed the resampled mono audio into MediaRecorder so the browser's
+      // native Opus encoder can produce a compact WebM file.
+      const renderCtx = new AudioCtx({ sampleRate: AUDIO_SAMPLE_RATE });
+      const destination = renderCtx.createMediaStreamDestination();
+      const playback = renderCtx.createBufferSource();
+      playback.buffer = monoBuffer;
+      playback.connect(destination);
+
+      let mimeType = '';
+      for (const candidate of ['audio/webm;codecs=opus', 'audio/webm']) {
+        if (MediaRecorder.isTypeSupported(candidate)) { mimeType = candidate; break; }
+      }
+      if (!mimeType) {
+        renderCtx.close();
+        return { blob: file, mimeType: file.type || 'audio/mpeg' };
+      }
+
+      const parts = [];
+      recorder = new MediaRecorder(destination.stream, { mimeType, audioBitsPerSecond: AUDIO_BITRATE });
+      const finished = new Promise((resolve, reject) => {
+        recorder.ondataavailable = e => { if (e.data && e.data.size) parts.push(e.data); };
+        recorder.onerror = () => reject(recorder.error || new Error('audio encoder failed'));
+        recorder.onstop = () => resolve();
+      });
+
+      playback.onended = () => recorder.stop();
+      recorder.start(1000);
+      playback.start(0);
+      await finished;
+      renderCtx.close();
+
+      const blob = new Blob(parts, { type: mimeType.split(';')[0] });
+      if (!blob.size || blob.size >= file.size * 0.95) {
+        return { blob: file, mimeType: file.type || 'audio/mpeg' };
+      }
+      return { blob, mimeType: 'audio/webm' };
+    } finally {
+      try { if (recorder && recorder.state !== 'inactive') recorder.stop(); } catch (e) {}
+      try { if (audioCtx) await audioCtx.close(); } catch (e) {}
+      if (stream) stream.getTracks().forEach(t => t.stop());
+    }
+  }
+
   async function sendAudio(file) {
     if (!file) return;
     const looksLikeAudio = (file.type && file.type.indexOf('audio/') === 0) ||
-      /\.(mp3|m4a|wav|ogg|aac|flac)$/i.test(file.name || '');
+      /\.(mp3|m4a|wav|ogg|aac|flac|webm)$/i.test(file.name || '');
     if (!looksLikeAudio) { setStatus('that\'s not an audio file'); return; }
-    if (file.size > MAX_AUDIO_BYTES) { setStatus('audio too big (max 8MB)'); return; }
+    if (file.size > MAX_AUDIO_BYTES) { setStatus('audio too big (max 16MB)'); return; }
 
     attachBtn.disabled = true;
     sendBtn.disabled = true;
-    setStatus('preparing audio…');
+    setStatus('compressing audio…');
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const result = await compressAudio(file);
+      const dataUrl = await blobToDataUrl(result.blob);
       const chunks = [];
       for (let i = 0; i < dataUrl.length; i += CHUNK_BUDGET) {
         chunks.push(dataUrl.slice(i, i + CHUNK_BUDGET));
       }
+
       setStatus('sending audio…');
       const msgRef = await roomsCol.doc(topic).collection('messages').add({
         type: 'audio',
         sender: currentUser,
         fileName: file.name,
-        mimeType: file.type || 'audio/mpeg',
+        mimeType: result.mimeType,
         totalChunks: chunks.length,
+        compressedBytes: result.blob.size,
         ts: FieldValue.serverTimestamp()
       });
-      await Promise.all(chunks.map((c, i) => msgRef.collection('chunks').doc(String(i)).set({ data: c })));
+
+      // Sequential writes avoid hammering Firestore with a large burst of
+      // chunk writes and make failures easier to recover from.
+      for (let i = 0; i < chunks.length; i++) {
+        await msgRef.collection('chunks').doc(String(i)).set({ data: chunks[i] });
+      }
       setStatus('live');
     } catch (e) {
+      console.error('audio upload failed', e);
       setStatus('audio upload failed');
     } finally {
       attachBtn.disabled = false;
@@ -999,12 +1141,35 @@
   }
   audioInput.addEventListener('change', () => sendAudio(audioInput.files && audioInput.files[0]));
 
-  async function loadAudioChunks(msgId) {
-    const snap = await roomsCol.doc(topic).collection('messages').doc(msgId).collection('chunks').get();
-    return snap.docs
-      .sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10))
-      .map(d => d.data().data)
-      .join('');
+  async function loadAudioChunks(msgId, expectedChunks = 0, mimeType = 'audio/webm') {
+    const chunksRef = roomsCol.doc(topic).collection('messages').doc(msgId).collection('chunks');
+
+    // Uploading creates the message first and the chunk documents afterwards,
+    // so the first read can legitimately happen before all chunks are present.
+    // Retry briefly until the complete audio is available.
+    let docs = [];
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const snap = await chunksRef.get();
+      docs = snap.docs
+        .sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10));
+
+      if (!expectedChunks || docs.length >= expectedChunks) break;
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+
+    if (expectedChunks && docs.length < expectedChunks) {
+      throw new Error('audio chunks are incomplete');
+    }
+
+    const joined = docs.map(d => d.data().data || '').join('');
+    if (!joined) throw new Error('audio data is empty');
+
+    // Chunks contain the complete data URL, including its MIME prefix.
+    // Keep that prefix intact so the browser knows how to decode the file.
+    if (joined.indexOf('data:') === 0) return joined;
+
+    // Fallback for any older messages that may contain raw base64 only.
+    return 'data:' + mimeType + ';base64,' + joined;
   }
 
   async function postJoinMessage(forTopic, sender) {
@@ -1016,6 +1181,10 @@
   }
 
   function shareLink() { return location.href.split('#')[0] + '#' + topic; }
+  pinModeBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    setPinMode(!pinMode);
+  });
   shareBtn.addEventListener('click', async () => {
     const link = shareLink();
     try {
@@ -1058,6 +1227,7 @@
     messageData.clear();
     messageNodes.clear();
     closeMessageMenu();
+    setPinMode(false);
     threadEl.querySelectorAll('.row, .meta, .system-line').forEach(n => n.remove());
     emptyEl.style.display = '';
     document.getElementById('chatBack').textContent = roomName;

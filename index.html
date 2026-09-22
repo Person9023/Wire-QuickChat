@@ -115,7 +115,32 @@
   .roomcard .name { font-size: 15.5px; font-weight: 600; }
   .roomcard .sub { font-size: 11px; color: var(--ink-dim); font-family: ui-monospace, monospace; margin-top: 2px; }
   .roomlist .emptyrooms { text-align: center; color: var(--ink-dim); font-size: 13.5px; padding: 30px 10px; }
-  .contacts-box { max-width: 480px; margin: 0 auto 14px; padding: 0 16px; }
+  .top-actions-row {
+    display: grid;
+    grid-template-columns: 300px 480px 300px;
+    justify-content: center;
+    align-items: start;
+    gap: 16px;
+    padding: 16px 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .top-actions-row .newroom-row {
+    grid-column: 2;
+    grid-row: 1;
+    width: 100%;
+    max-width: 480px;
+    margin: 0;
+    padding: 0;
+  }
+  .top-actions-row .contacts-box {
+    grid-column: 1;
+    grid-row: 1;
+    width: 300px;
+    max-width: 300px;
+    margin: 0;
+    padding: 0;
+  }
 .contacts-title { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); margin: 0 0 7px 2px; text-transform: uppercase; letter-spacing: .04em; }
 .contact-add-row { display: flex; gap: 8px; }
 .contact-add-row input {
@@ -137,12 +162,32 @@
 .contact-chip:hover { border-color: var(--accent); }
 .roomcard.direct-room { border-left: 3px solid var(--accent); }
 .roomcard .direct-label { font-size: 9px; color: var(--accent); font-family: ui-monospace, monospace; margin-top: 3px; text-transform: uppercase; }
-.newroom-row { display: flex; gap: 8px; max-width: 480px; margin: 0 auto 16px; padding: 16px 16px 0; }
+.newroom-row { max-width: 480px; margin: 0 auto 16px; padding: 0; }
+.newroom-title { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); margin: 0 0 7px 2px; text-transform: uppercase; letter-spacing: .04em; }
+.newroom-input-row { display: flex; gap: 8px; }
   .newroom-row input {
     flex: 1; padding: 10px 13px; border-radius: 12px; border: 1px solid var(--line);
     background: var(--panel); color: var(--ink); font-family: inherit; font-size: 14.5px; outline: none;
   }
   .newroom-row input:focus { border-color: var(--accent); }
+  @media (max-width: 1128px) {
+    .top-actions-row { display: flex; flex-direction: column; align-items: center; }
+    .top-actions-row .newroom-row {
+      order: 1;
+      width: 100%;
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 0;
+      align-self: center;
+    }
+    .top-actions-row .contacts-box {
+      order: 2;
+      width: 100%;
+      max-width: 480px;
+      margin: 0 auto;
+      align-self: center;
+    }
+  }
   .newroom-row button {
     border: none; background: var(--accent); color: #fff; font-family: ui-monospace, monospace;
     font-size: 12px; padding: 0 16px; border-radius: 12px; cursor: pointer; white-space: nowrap;
@@ -241,18 +286,23 @@
       <button class="iconbtn" id="logoutBtn">log out</button>
     </div>
   </header>
-  <div class="newroom-row">
-    <input id="newRoomName" type="text" maxlength="40" placeholder="Name a new room…" autocomplete="off">
-    <button id="createRoomBtn">Create</button>
-  </div>
-  <div class="contacts-box">
-    <div class="contacts-title">Contacts</div>
-    <div class="contact-add-row">
-      <input id="contactUsernameInput" type="text" maxlength="24" placeholder="Add by username…" autocomplete="off">
-      <button id="addContactBtn" type="button">Add</button>
+  <div class="top-actions-row">
+    <div class="newroom-row">
+      <div class="newroom-title">Make a Wire</div>
+      <div class="newroom-input-row">
+      <input id="newRoomName" type="text" maxlength="40" placeholder="Name a new room…" autocomplete="off">
+      <button id="createRoomBtn">Create</button>
+      </div>
     </div>
-    <div class="contact-error" id="contactError"></div>
-    <div class="contacts-list" id="contactsList"></div>
+    <div class="contacts-box">
+      <div class="contacts-title">Contacts</div>
+      <div class="contact-add-row">
+        <input id="contactUsernameInput" type="text" maxlength="24" placeholder="Add by username…" autocomplete="off">
+        <button id="addContactBtn" type="button">Add</button>
+      </div>
+      <div class="contact-error" id="contactError"></div>
+      <div class="contacts-list" id="contactsList"></div>
+    </div>
   </div>
   <div class="rooms-wrap">
     <div class="roomlist" id="roomList"></div>

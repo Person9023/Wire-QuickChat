@@ -1,4 +1,4 @@
-<!DOCTYPE html><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -111,6 +111,7 @@
     padding: 14px 16px; cursor: pointer;
   }
   .roomcard:hover { border-color: var(--accent); }
+  .roomcard-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .roomcard .name { font-size: 15.5px; font-weight: 600; }
   .roomcard .sub { font-size: 11px; color: var(--ink-dim); font-family: ui-monospace, monospace; margin-top: 2px; }
   .roomlist .emptyrooms { text-align: center; color: var(--ink-dim); font-size: 13.5px; padding: 30px 10px; }
@@ -390,10 +391,35 @@
 
   function getMyRooms() { return myRoomsCache; }
 
+  async function refreshRoomMetadata(roomEntries) {
+    const entries = Array.isArray(roomEntries) ? roomEntries : [];
+    const enriched = await Promise.all(entries.map(async (r) => {
+      if (!r || !r.id) return r;
+      try {
+        const snap = await roomsCol.doc(r.id).get();
+        if (snap.exists) {
+          const data = snap.data() || {};
+          return {
+            id: r.id,
+            name: data.name || r.name || r.id,
+            creator: data.creator || r.creator || null
+          };
+        }
+      } catch (e) {}
+      return {
+        id: r.id,
+        name: r.name || r.id,
+        creator: r.creator || null
+      };
+    }));
+    return enriched.filter(Boolean);
+  }
+
   function subscribeRooms() {
     if (roomsUnsub) { roomsUnsub(); roomsUnsub = null; }
-    roomsUnsub = accountsCol.doc(currentUser).onSnapshot((snap) => {
-      myRoomsCache = (snap.exists && snap.data().rooms) || [];
+    roomsUnsub = accountsCol.doc(currentUser).onSnapshot(async (snap) => {
+      const rawRooms = (snap.exists && snap.data().rooms) || [];
+      myRoomsCache = await refreshRoomMetadata(rawRooms);
       renderRoomList();
       resubscribeNotifyListeners();
     }, () => {});
@@ -466,13 +492,76 @@
   }
   updateNotifBtn();
 
-  async function addRoomToMyList(topic, name) {
+  async function addRoomToMyList(topic, name, creator) {
     if (myRoomsCache.some(r => r.id === topic)) return;
     try {
       await accountsCol.doc(currentUser).update({
-        rooms: FieldValue.arrayUnion({ id: topic, name: name || topic })
+        rooms: FieldValue.arrayUnion({
+          id: topic,
+          name: name || topic,
+          creator: creator || null
+        })
       });
     } catch (e) {}
+  }
+
+  async function deleteRoom(roomId) {
+    const roomRef = roomsCol.doc(roomId);
+
+    // Delete all message documents and their audio chunk subcollections.
+    const messagesSnap = await roomRef.collection('messages').get();
+    for (const messageDoc of messagesSnap.docs) {
+      const chunksSnap = await messageDoc.ref.collection('chunks').get();
+      if (!chunksSnap.empty) {
+        const chunkDocs = chunksSnap.docs;
+        for (let i = 0; i < chunkDocs.length; i += 400) {
+          const batch = firestoreDb.batch();
+          chunkDocs.slice(i, i + 400).forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      }
+      await messageDoc.ref.delete();
+    }
+
+    // Delete the room itself.
+    await roomRef.delete();
+
+    // Remove it from the account that requested deletion.
+    // DuckedOUT99 can also delete legacy rooms created before the
+    // creator field existed, so the room is removed from that account too.
+    const accountRef = accountsCol.doc(currentUser);
+    const accountSnap = await accountRef.get();
+    if (accountSnap.exists) {
+      const rooms = accountSnap.data().rooms || [];
+      await accountRef.update({
+        rooms: rooms.filter(r => r.id !== roomId)
+      });
+    }
+
+    // If DuckedOUT99 deleted a legacy room, also remove that room from
+    // the old creator's room list when that information is available.
+    if (currentUser === 'DuckedOUT99') {
+      const allAccounts = await accountsCol.get();
+      const cleanupPromises = [];
+      allAccounts.forEach(accountDoc => {
+        if (accountDoc.id === currentUser) return;
+        const rooms = accountDoc.data().rooms || [];
+        if (rooms.some(r => r.id === roomId)) {
+          cleanupPromises.push(
+            accountDoc.ref.update({
+              rooms: rooms.filter(r => r.id !== roomId)
+            })
+          );
+        }
+      });
+      await Promise.all(cleanupPromises);
+    }
+
+    // Stop notifications for the deleted room immediately.
+    if (notifyUnsubs[roomId]) {
+      notifyUnsubs[roomId]();
+      delete notifyUnsubs[roomId];
+    }
   }
 
   function renderRoomList() {
@@ -485,9 +574,37 @@
       rooms.forEach(r => {
         const card = document.createElement('div');
         card.className = 'roomcard';
-        card.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><div class="iconbtn" style="pointer-events:none;">open →</div>';
+        card.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><div class="roomcard-actions"><div class="iconbtn open-room-btn" style="pointer-events:none;">open →</div></div>';
         card.querySelector('.name').textContent = r.name;
         card.querySelector('.sub').textContent = r.id;
+
+        // The room document is the source of truth for ownership. This also
+        // fixes rooms whose account-list entry was created before the creator
+        // field was added.
+        if (r.creator === currentUser || currentUser === 'DuckedOUT99') {
+          const deleteBtn = document.createElement('button');
+          deleteBtn.className = 'iconbtn';
+          deleteBtn.textContent = 'delete';
+          deleteBtn.type = 'button';
+          deleteBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const ok = window.confirm('Delete "' + r.name + '"? This will permanently delete the room and its messages.');
+            if (!ok) return;
+
+            deleteBtn.disabled = true;
+            deleteBtn.textContent = 'deleting…';
+            try {
+              await deleteRoom(r.id);
+            } catch (err) {
+              console.error('room deletion failed', err);
+              deleteBtn.disabled = false;
+              deleteBtn.textContent = 'delete';
+              window.alert('Could not delete the room. Check your connection and try again.');
+            }
+          });
+          card.querySelector('.roomcard-actions').appendChild(deleteBtn);
+        }
+
         card.addEventListener('click', () => enterChatView(r.id, r.name));
         roomListEl.appendChild(card);
       });
@@ -524,12 +641,17 @@
 
     if (errEl) errEl.textContent = 'Looking up that room…';
     let name = 'Shared room';
+    let creator = null;
     try {
       const snap = await roomsCol.doc(topic).get();
-      if (snap.exists && snap.data().name) name = snap.data().name;
+      if (snap.exists) {
+        const roomData = snap.data();
+        if (roomData.name) name = roomData.name;
+        creator = roomData.creator || null;
+      }
     } catch (e) {}
 
-    await addRoomToMyList(topic, name);
+    await addRoomToMyList(topic, name, creator);
     if (errEl) errEl.textContent = '';
     postJoinMessage(topic, currentUser);
     enterChatView(topic, name);
@@ -547,8 +669,17 @@
     if (!name) { newRoomNameEl.focus(); return; }
     const topic = randomTopic();
     newRoomNameEl.value = '';
-    try { await roomsCol.doc(topic).set({ name: name, createdAt: FieldValue.serverTimestamp() }); } catch (e) {}
-    await addRoomToMyList(topic, name);
+    try {
+      await roomsCol.doc(topic).set({
+        name: name,
+        creator: currentUser,
+        createdAt: FieldValue.serverTimestamp()
+      });
+    } catch (e) {
+      setStatus('room creation failed');
+      return;
+    }
+    await addRoomToMyList(topic, name, currentUser);
     enterChatView(topic, name);
   });
   newRoomNameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('createRoomBtn').click(); });
@@ -1262,3 +1393,4 @@
 </script>
 </body>
 </html>
+

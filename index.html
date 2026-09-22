@@ -140,16 +140,54 @@
   .system-line { text-align: center; font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); margin: 12px 4px; }
 
   .attachbtn {
-    border: none; background: transparent; color: var(--ink-dim); font-size: 19px;
-    padding: 8px 4px; cursor: pointer; flex-shrink: 0; line-height: 1;
+    border: none; background: transparent; color: var(--ink-dim); font-size: 22px;
+    width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; flex-shrink: 0; line-height: 1;
   }
-  .attachbtn:hover { color: var(--accent); }
+  .attachbtn:hover { color: var(--accent); background: var(--bg); }
   .attachbtn:disabled { opacity: 0.4; cursor: default; }
+  .attach-wrap { position: relative; }
+  .attach-menu {
+    position: absolute; bottom: 42px; left: 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 6px; display: none; flex-direction: column; gap: 2px; min-width: 170px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.14); z-index: 15;
+  }
+  .attach-menu.open { display: flex; }
+  .attach-menu-item {
+    border: none; background: transparent; text-align: left; padding: 9px 11px; border-radius: 8px;
+    font-family: inherit; font-size: 14px; color: var(--ink); cursor: pointer;
+  }
+  .attach-menu-item:hover { background: var(--bg); }
   .bubble.imgbubble { padding: 4px; max-width: 68%; }
   .bubble.imgbubble img {
     display: block; width: 100%; max-height: 320px; object-fit: cover;
     border-radius: 12px; cursor: pointer;
   }
+  .bubble.audiobubble { display: flex; flex-direction: column; gap: 6px; max-width: 82%; }
+  .audio-filename { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); word-break: break-all; }
+  .audio-loading { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); }
+  .bubble.audiobubble audio { width: 230px; max-width: 100%; }
+  .pinbar {
+    position: sticky; top: 0; z-index: 4; display: none; align-items: center; gap: 8px;
+    min-height: 34px; padding: 7px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+    color: var(--ink); font-size: 12px; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .pinbar.show { display: flex; }
+  .pinbar-label { font-family: ui-monospace, monospace; font-size: 10px; color: var(--accent); font-weight: 700; flex-shrink: 0; }
+  .pinbar-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--ink-dim); }
+  .row.pinned .bubble { box-shadow: 0 0 0 1px var(--accent); }
+  .pinmark { font-family: ui-monospace, monospace; font-size: 9px; color: var(--accent); margin-top: 3px; }
+  .message-menu {
+    position: fixed; z-index: 30; display: none; min-width: 125px; padding: 5px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  }
+  .message-menu.open { display: block; }
+  .message-menu button {
+    width: 100%; border: none; background: transparent; color: var(--ink); text-align: left;
+    padding: 8px 10px; border-radius: 7px; font-family: inherit; font-size: 13px; cursor: pointer;
+  }
+  .message-menu button:hover { background: var(--bg); }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
@@ -177,6 +215,7 @@
     <h1>Wire</h1>
     <div class="right">
       <span class="status" id="whoami"></span>
+      <button class="iconbtn" id="notifyBtn">🔔 off</button>
       <button class="iconbtn" id="logoutBtn">log out</button>
     </div>
   </header>
@@ -204,13 +243,24 @@
       <button class="iconbtn" id="shareBtn">copy link</button>
     </div>
   </header>
+  <div class="pinbar" id="pinBar">
+    <span class="pinbar-label">PINNED</span><span class="pinbar-text" id="pinBarText"></span>
+  </div>
   <main id="thread">
     <div class="empty" id="emptyState">No messages yet — say something.</div>
   </main>
+  <div class="message-menu" id="messageMenu"><button id="pinMessageBtn">Pin message</button></div>
   <footer>
     <form id="composer">
-      <button type="button" class="attachbtn" id="attachBtn" title="Attach an image">📷</button>
+      <div class="attach-wrap">
+        <button type="button" class="attachbtn" id="attachBtn" title="Add attachment">+</button>
+        <div class="attach-menu" id="attachMenu">
+          <button type="button" class="attach-menu-item" id="attachImageOption">🖼 Image</button>
+          <button type="button" class="attach-menu-item" id="attachAudioOption">🎵 Audio / voice clip</button>
+        </div>
+      </div>
       <input type="file" id="imageInput" accept="image/*" style="display:none;">
+      <input type="file" id="audioInput" accept="audio/*,.mp3,.m4a,.wav,.ogg,.aac,.flac" style="display:none;">
       <textarea id="input" rows="1" placeholder="Message" maxlength="2000"></textarea>
       <button class="send" id="send" type="submit">send</button>
     </form>
@@ -232,7 +282,9 @@
   const accountsCol = firestoreDb.collection('wire-accounts');
   const roomsCol = firestoreDb.collection('wire-rooms');
   const FieldValue = firebase.firestore.FieldValue;
-  const IMAGE_BYTE_BUDGET = 700000; // stay safely under Firestore's 1MB-per-document cap
+  const IMAGE_BYTE_BUDGET = 700000; // encoded-image ceiling; safely under Firestore's 1MB document cap
+  const CHUNK_BUDGET = 700000; // per-chunk budget for larger files split across documents
+  const MAX_AUDIO_BYTES = 8 * 1024 * 1024; // raw file cap before base64 overhead
 
   async function hashPassword(pw) {
     const enc = new TextEncoder().encode(pw);
@@ -317,6 +369,8 @@
 
   document.getElementById('logoutBtn').addEventListener('click', () => {
     if (roomsUnsub) { roomsUnsub(); roomsUnsub = null; }
+    Object.values(notifyUnsubs).forEach(fn => fn());
+    notifyUnsubs = {};
     currentUser = null;
     myRoomsCache = [];
     authUsername.value = '';
@@ -341,8 +395,76 @@
     roomsUnsub = accountsCol.doc(currentUser).onSnapshot((snap) => {
       myRoomsCache = (snap.exists && snap.data().rooms) || [];
       renderRoomList();
+      resubscribeNotifyListeners();
     }, () => {});
   }
+
+  // ---------- notifications (foreground only — see note to the user) ----------
+  const notifyBtn = document.getElementById('notifyBtn');
+  let notificationsEnabled = false;
+  let notifyUnsubs = {}; // topic -> unsubscribe fn
+
+  function updateNotifBtn() {
+    if (!('Notification' in window)) { notifyBtn.textContent = '🔔 n/a'; notifyBtn.disabled = true; return; }
+    if (Notification.permission === 'denied') { notifyBtn.textContent = '🔔 blocked'; return; }
+    notifyBtn.textContent = notificationsEnabled ? '🔔 on' : '🔔 off';
+  }
+
+  function resubscribeNotifyListeners() {
+    const currentIds = new Set(myRoomsCache.map(r => r.id));
+    Object.keys(notifyUnsubs).forEach((id) => {
+      if (!currentIds.has(id)) { notifyUnsubs[id](); delete notifyUnsubs[id]; }
+    });
+    if (!notificationsEnabled) return;
+    myRoomsCache.forEach((r) => {
+      if (notifyUnsubs[r.id]) return;
+      let firstFire = true;
+      notifyUnsubs[r.id] = roomsCol.doc(r.id).collection('messages').orderBy('ts', 'desc').limit(1)
+        .onSnapshot((snap) => {
+          if (firstFire) { firstFire = false; return; } // don't notify for history on subscribe
+          snap.docChanges().forEach((change) => {
+            if (change.type !== 'added') return;
+            const data = change.doc.data();
+            if (data.sender === currentUser) return;
+            const alreadyOpen = document.getElementById('view-chat').classList.contains('active') && topic === r.id;
+            if (alreadyOpen) return;
+            let body = data.text || 'New message';
+            if (data.type === 'image') body = '📷 sent a photo';
+            if (data.type === 'audio') body = '🎵 sent an audio clip';
+            if (data.type === 'join') return;
+            try { new Notification(r.name + ' · ' + data.sender, { body: body }); } catch (e) {}
+          });
+        }, () => {});
+    });
+  }
+
+  notifyBtn.addEventListener('click', async () => {
+    if (!('Notification' in window)) return;
+    if (notificationsEnabled) {
+      notificationsEnabled = false;
+      localStorage.setItem('wire-notify-pref', '0');
+      Object.values(notifyUnsubs).forEach(fn => fn());
+      notifyUnsubs = {};
+      updateNotifBtn();
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      window.alert('Notifications are blocked for this site in your browser settings — enable them there, then try again.');
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { updateNotifBtn(); return; }
+    notificationsEnabled = true;
+    localStorage.setItem('wire-notify-pref', '1');
+    updateNotifBtn();
+    resubscribeNotifyListeners();
+  });
+
+  // restore preference on load, without re-prompting if permission is already settled
+  if (('Notification' in window) && localStorage.getItem('wire-notify-pref') === '1' && Notification.permission === 'granted') {
+    notificationsEnabled = true;
+  }
+  updateNotifBtn();
 
   async function addRoomToMyList(topic, name) {
     if (myRoomsCache.some(r => r.id === topic)) return;
@@ -451,6 +573,11 @@
   let roomName = '';
   let msgsUnsub = null;
   const renderedIds = new Set();
+  const messageData = new Map();
+  const messageNodes = new Map();
+  const PIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+  let selectedMessageId = null;
+  let pinBarTargetId = null;
 
   function autoGrow() {
     input.style.height = 'auto';
@@ -481,9 +608,124 @@
     line.textContent = text;
     threadEl.appendChild(line);
   }
+  function messageDate(data) {
+    try { return data.ts && data.ts.toDate ? data.ts.toDate() : null; } catch (e) { return null; }
+  }
+
+  function messagePreview(data) {
+    if (data.type === 'image') return 'Photo';
+    if (data.type === 'audio') return 'Audio clip';
+    if (data.type === 'join') return (data.sender || 'Someone') + ' joined the wire';
+    const t = (data.text || '').replace(/\s+/g, ' ').trim();
+    return t || 'Message';
+  }
+
+  function getPinnedIds() {
+    return Array.from(messageData.entries()).filter(([id, d]) => d.pinned).map(([id]) => id);
+  }
+
+  function scrollToMessage(id) {
+    const node = messageNodes.get(id);
+    if (!node) return;
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(updatePinBar, 250);
+  }
+
+  function updatePinBar() {
+    const pinBar = document.getElementById('pinBar');
+    const pinText = document.getElementById('pinBarText');
+    const pinned = getPinnedIds().filter(id => messageNodes.has(id));
+    if (!pinned.length) {
+      pinBar.classList.remove('show');
+      pinBarTargetId = null;
+      return;
+    }
+
+    const mainRect = threadEl.getBoundingClientRect();
+    const viewportCenter = mainRect.top + mainRect.height / 2;
+    const visiblePinned = [];
+    pinned.forEach(id => {
+      const r = messageNodes.get(id).getBoundingClientRect();
+      if (r.bottom >= mainRect.top && r.top <= mainRect.bottom) visiblePinned.push(id);
+    });
+
+    let candidates = pinned;
+    if (visiblePinned.length && pinned.length > visiblePinned.length) {
+      candidates = pinned.filter(id => !visiblePinned.includes(id));
+    }
+    let best = null, bestDist = Infinity;
+    candidates.forEach(id => {
+      const r = messageNodes.get(id).getBoundingClientRect();
+      const dist = Math.abs((r.top + r.bottom) / 2 - viewportCenter);
+      if (dist < bestDist) { bestDist = dist; best = id; }
+    });
+    if (!best) best = pinned[0];
+
+    pinBarTargetId = best;
+    pinText.textContent = messagePreview(messageData.get(best));
+    pinBar.classList.add('show');
+  }
+
+  async function togglePin(id) {
+    const data = messageData.get(id);
+    if (!data || !topic) return;
+    try {
+      await roomsCol.doc(topic).collection('messages').doc(id).update({ pinned: !data.pinned });
+      closeMessageMenu();
+    } catch (e) {
+      setStatus('could not change pin');
+    }
+  }
+
+  function closeMessageMenu() {
+    document.getElementById('messageMenu').classList.remove('open');
+    selectedMessageId = null;
+  }
+
+  function openMessageMenu(id, x, y) {
+    selectedMessageId = id;
+    const menu = document.getElementById('messageMenu');
+    const btn = document.getElementById('pinMessageBtn');
+    const data = messageData.get(id);
+    btn.textContent = data && data.pinned ? 'Unpin message' : 'Pin message';
+    menu.classList.add('open');
+    menu.style.left = Math.min(x, window.innerWidth - 145) + 'px';
+    menu.style.top = Math.min(y, window.innerHeight - 55) + 'px';
+  }
+
+  async function cleanupExpiredMessages() {
+    if (!topic) return;
+    const cutoff = new Date(Date.now() - PIN_AGE_MS);
+    try {
+      const snap = await roomsCol.doc(topic).collection('messages').where('ts', '<', cutoff).limit(100).get();
+      if (snap.empty) return;
+      const batch = firestoreDb.batch();
+      let count = 0;
+      snap.docs.forEach(doc => {
+        if (!doc.data().pinned) { batch.delete(doc.ref); count++; }
+      });
+      if (count) await batch.commit();
+    } catch (e) {}
+  }
+
   function renderMessageDoc(id, data) {
-    if (renderedIds.has(id)) return;
+    if (renderedIds.has(id)) {
+      messageData.set(id, data);
+      const existing = messageNodes.get(id);
+      if (existing) {
+        existing.classList.toggle('pinned', !!data.pinned);
+        const mark = existing.querySelector('.pinmark');
+        if (mark) mark.remove();
+        if (data.pinned) {
+          const m = document.createElement('div'); m.className = 'pinmark'; m.textContent = 'pinned';
+          existing.appendChild(m);
+        }
+      }
+      updatePinBar();
+      return;
+    }
     renderedIds.add(id);
+    messageData.set(id, data);
     emptyEl.style.display = 'none';
 
     if (data.type === 'join') {
@@ -505,6 +747,26 @@
       img.alt = 'shared image';
       img.addEventListener('click', () => window.open(data.imageData, '_blank'));
       bubble.appendChild(img);
+    } else if (data.type === 'audio') {
+      bubble.className = 'bubble audiobubble';
+      const label = document.createElement('div');
+      label.className = 'audio-filename';
+      label.textContent = data.fileName || 'audio clip';
+      bubble.appendChild(label);
+      const note = document.createElement('div');
+      note.className = 'audio-loading';
+      note.textContent = 'loading…';
+      bubble.appendChild(note);
+      const audioEl = document.createElement('audio');
+      audioEl.controls = true;
+      audioEl.preload = 'none';
+      audioEl.style.display = 'none';
+      bubble.appendChild(audioEl);
+      loadAudioChunks(id).then((dataUrl) => {
+        audioEl.src = dataUrl;
+        audioEl.style.display = '';
+        note.remove();
+      }).catch(() => { note.textContent = 'failed to load'; });
     } else {
       bubble.className = 'bubble';
       bubble.textContent = data.text || '';
@@ -526,6 +788,7 @@
     }
     threadEl.appendChild(row);
     threadEl.appendChild(meta);
+    updatePinBar();
   }
 
   function setStatus(text) { statusEl.textContent = text; }
@@ -550,7 +813,23 @@
   }
 
   const attachBtn = document.getElementById('attachBtn');
+  const attachMenu = document.getElementById('attachMenu');
   const imageInput = document.getElementById('imageInput');
+  const audioInput = document.getElementById('audioInput');
+
+  attachBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    attachMenu.classList.toggle('open');
+  });
+  document.addEventListener('click', () => attachMenu.classList.remove('open'));
+  document.getElementById('attachImageOption').addEventListener('click', () => {
+    attachMenu.classList.remove('open');
+    imageInput.click();
+  });
+  document.getElementById('attachAudioOption').addEventListener('click', () => {
+    attachMenu.classList.remove('open');
+    audioInput.click();
+  });
 
   function readFileAsImage(file) {
     return new Promise((resolve, reject) => {
@@ -566,16 +845,66 @@
     });
   }
 
-  // Resizes + compresses down to a byte budget so it fits in one Firestore
-  // document (no paid Storage plan needed — the image just rides in the message).
-  function compressToBudget(img, maxDim, quality) {
+  // Images are deliberately kept small because they live directly inside Firestore
+  // message documents. WebP usually gives much smaller files than JPEG at similar
+  // visual quality, while the 1024px maximum dimension keeps phone photos cheap.
+  //
+  // Target: roughly 180–220 KB per image in normal cases.
+  const IMAGE_TARGET_BYTES = 220000;
+
+  function canvasToDataUrl(canvas, type, quality) {
+    const dataUrl = canvas.toDataURL(type, quality);
+    // Fall back to JPEG if WebP encoding is unavailable.
+    return (type === 'image/webp' && !dataUrl.startsWith('data:image/webp'))
+      ? canvas.toDataURL('image/jpeg', quality)
+      : dataUrl;
+  }
+
+  function compressImage(img, maxDim, quality, type) {
     const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(img.width * scale));
     canvas.height = Math.max(1, Math.round(img.height * scale));
-    const ctx = canvas.getContext('2d');
+
+    const ctx = canvas.getContext('2d', { alpha: false });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', quality);
+
+    return canvasToDataUrl(canvas, type, quality);
+  }
+
+  async function makeCompactImage(img) {
+    // WebP is tried first because it normally gives much better compression.
+    // JPEG is the compatibility fallback.
+    for (const type of ['image/webp', 'image/jpeg']) {
+      for (const maxDim of [1024, 900, 800, 700, 600]) {
+        let best = null;
+        let low = 0.30;
+        let high = 0.78;
+
+        // Seven iterations are enough to get very close to the largest
+        // quality that still fits the target size.
+        for (let i = 0; i < 7; i++) {
+          const quality = (low + high) / 2;
+          const candidate = compressImage(img, maxDim, quality, type);
+
+          if (candidate.length <= IMAGE_TARGET_BYTES) {
+            best = candidate;
+            low = quality;
+          } else {
+            high = quality;
+          }
+        }
+
+        if (best) return best;
+      }
+    }
+
+    // Final safety fallback for unusually difficult images.
+    return compressImage(img, 512, 0.28, 'image/jpeg');
   }
 
   async function sendImage(file) {
@@ -584,31 +913,32 @@
       setStatus('that\'s not an image');
       return;
     }
+
     attachBtn.disabled = true;
     sendBtn.disabled = true;
-    setStatus('preparing image…');
+    setStatus('compressing image…');
+
     try {
       const img = await readFileAsImage(file);
-      const attempts = [
-        [1280, 0.7], [1000, 0.6], [800, 0.5], [600, 0.4], [420, 0.35]
-      ];
-      let dataUrl = null;
-      for (const [maxDim, quality] of attempts) {
-        const candidate = compressToBudget(img, maxDim, quality);
-        if (candidate.length <= IMAGE_BYTE_BUDGET) { dataUrl = candidate; break; }
-        dataUrl = candidate; // keep smallest attempt so far as a fallback
-      }
-      if (!dataUrl || dataUrl.length > IMAGE_BYTE_BUDGET * 1.4) {
-        setStatus('image too complex to shrink enough — try another');
+      const dataUrl = await makeCompactImage(img);
+
+      // Data URLs contain base64, so the string is larger than the binary file.
+      // Keep the existing Firestore safety margin.
+      if (!dataUrl || dataUrl.length > IMAGE_BYTE_BUDGET) {
+        setStatus('image could not be compressed enough');
         return;
       }
-      setStatus('sending image…');
+
+      const approxKB = Math.round((dataUrl.length * 3) / 4 / 1024);
+      setStatus('sending image (' + approxKB + ' KB)…');
+
       await roomsCol.doc(topic).collection('messages').add({
         type: 'image',
         sender: currentUser,
         imageData: dataUrl,
         ts: FieldValue.serverTimestamp()
       });
+
       setStatus('live');
     } catch (e) {
       setStatus('image upload failed');
@@ -618,8 +948,64 @@
       imageInput.value = '';
     }
   }
-  attachBtn.addEventListener('click', () => imageInput.click());
+
   imageInput.addEventListener('change', () => sendImage(imageInput.files && imageInput.files[0]));
+
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Larger files (audio) don't fit in one Firestore document, so they're split
+  // into ordered chunk documents under the message and reassembled on playback.
+  async function sendAudio(file) {
+    if (!file) return;
+    const looksLikeAudio = (file.type && file.type.indexOf('audio/') === 0) ||
+      /\.(mp3|m4a|wav|ogg|aac|flac)$/i.test(file.name || '');
+    if (!looksLikeAudio) { setStatus('that\'s not an audio file'); return; }
+    if (file.size > MAX_AUDIO_BYTES) { setStatus('audio too big (max 8MB)'); return; }
+
+    attachBtn.disabled = true;
+    sendBtn.disabled = true;
+    setStatus('preparing audio…');
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const chunks = [];
+      for (let i = 0; i < dataUrl.length; i += CHUNK_BUDGET) {
+        chunks.push(dataUrl.slice(i, i + CHUNK_BUDGET));
+      }
+      setStatus('sending audio…');
+      const msgRef = await roomsCol.doc(topic).collection('messages').add({
+        type: 'audio',
+        sender: currentUser,
+        fileName: file.name,
+        mimeType: file.type || 'audio/mpeg',
+        totalChunks: chunks.length,
+        ts: FieldValue.serverTimestamp()
+      });
+      await Promise.all(chunks.map((c, i) => msgRef.collection('chunks').doc(String(i)).set({ data: c })));
+      setStatus('live');
+    } catch (e) {
+      setStatus('audio upload failed');
+    } finally {
+      attachBtn.disabled = false;
+      sendBtn.disabled = false;
+      audioInput.value = '';
+    }
+  }
+  audioInput.addEventListener('change', () => sendAudio(audioInput.files && audioInput.files[0]));
+
+  async function loadAudioChunks(msgId) {
+    const snap = await roomsCol.doc(topic).collection('messages').doc(msgId).collection('chunks').get();
+    return snap.docs
+      .sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10))
+      .map(d => d.data().data)
+      .join('');
+  }
 
   async function postJoinMessage(forTopic, sender) {
     try {
@@ -641,6 +1027,18 @@
       window.prompt('Copy this link:', link);
     }
   });
+  document.getElementById('pinBar').addEventListener('click', () => {
+    if (pinBarTargetId) scrollToMessage(pinBarTargetId);
+  });
+  document.getElementById('pinMessageBtn').addEventListener('click', () => {
+    if (selectedMessageId) togglePin(selectedMessageId);
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#messageMenu')) closeMessageMenu();
+  });
+  threadEl.addEventListener('scroll', updatePinBar, { passive: true });
+  window.addEventListener('resize', updatePinBar);
+
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     const text = input.value.trim();
@@ -657,19 +1055,33 @@
     roomName = name || t;
     location.hash = topic;
     renderedIds.clear();
+    messageData.clear();
+    messageNodes.clear();
+    closeMessageMenu();
     threadEl.querySelectorAll('.row, .meta, .system-line').forEach(n => n.remove());
     emptyEl.style.display = '';
     document.getElementById('chatBack').textContent = roomName;
     setStatus('connecting…');
     showView('view-chat');
+    updatePinBar();
+    cleanupExpiredMessages();
 
     msgsUnsub = roomsCol.doc(topic).collection('messages').orderBy('ts', 'asc').limit(500)
       .onSnapshot((snap) => {
         setStatus('live');
         snap.docChanges().forEach((change) => {
-          if (change.type === 'added') renderMessageDoc(change.doc.id, change.doc.data());
+          if (change.type === 'added' || change.type === 'modified') renderMessageDoc(change.doc.id, change.doc.data());
+          if (change.type === 'removed') {
+            renderedIds.delete(change.doc.id);
+            messageData.delete(change.doc.id);
+            const node = messageNodes.get(change.doc.id);
+            if (node) node.remove();
+            messageNodes.delete(change.doc.id);
+          }
         });
+        updatePinBar();
         threadEl.scrollTop = threadEl.scrollHeight;
+        cleanupExpiredMessages();
       }, () => setStatus('error'));
   }
 

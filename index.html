@@ -115,7 +115,29 @@
   .roomcard .name { font-size: 15.5px; font-weight: 600; }
   .roomcard .sub { font-size: 11px; color: var(--ink-dim); font-family: ui-monospace, monospace; margin-top: 2px; }
   .roomlist .emptyrooms { text-align: center; color: var(--ink-dim); font-size: 13.5px; padding: 30px 10px; }
-  .newroom-row { display: flex; gap: 8px; max-width: 480px; margin: 0 auto 16px; padding: 16px 16px 0; }
+  .contacts-box { max-width: 480px; margin: 0 auto 14px; padding: 0 16px; }
+.contacts-title { font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-dim); margin: 0 0 7px 2px; text-transform: uppercase; letter-spacing: .04em; }
+.contact-add-row { display: flex; gap: 8px; }
+.contact-add-row input {
+  flex: 1; padding: 10px 13px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink); font-family: inherit; font-size: 14px; outline: none;
+}
+.contact-add-row input:focus { border-color: var(--accent); }
+.contact-add-row button {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink-dim);
+  font-family: ui-monospace, monospace; font-size: 11px; padding: 0 14px; border-radius: 12px; cursor: pointer; white-space: nowrap;
+}
+.contact-add-row button:hover { border-color: var(--accent); color: var(--ink); }
+.contact-error { min-height: 1em; margin: 5px 2px 0; font-size: 11.5px; color: var(--accent); }
+.contacts-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.contact-chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 999px; padding: 7px 10px; font-size: 12px; cursor: pointer;
+}
+.contact-chip:hover { border-color: var(--accent); }
+.roomcard.direct-room { border-left: 3px solid var(--accent); }
+.roomcard .direct-label { font-size: 9px; color: var(--accent); font-family: ui-monospace, monospace; margin-top: 3px; text-transform: uppercase; }
+.newroom-row { display: flex; gap: 8px; max-width: 480px; margin: 0 auto 16px; padding: 16px 16px 0; }
   .newroom-row input {
     flex: 1; padding: 10px 13px; border-radius: 12px; border: 1px solid var(--line);
     background: var(--panel); color: var(--ink); font-family: inherit; font-size: 14.5px; outline: none;
@@ -222,6 +244,15 @@
   <div class="newroom-row">
     <input id="newRoomName" type="text" maxlength="40" placeholder="Name a new room…" autocomplete="off">
     <button id="createRoomBtn">Create</button>
+  </div>
+  <div class="contacts-box">
+    <div class="contacts-title">Contacts</div>
+    <div class="contact-add-row">
+      <input id="contactUsernameInput" type="text" maxlength="24" placeholder="Add by username…" autocomplete="off">
+      <button id="addContactBtn" type="button">Add</button>
+    </div>
+    <div class="contact-error" id="contactError"></div>
+    <div class="contacts-list" id="contactsList"></div>
   </div>
   <div class="rooms-wrap">
     <div class="roomlist" id="roomList"></div>
@@ -399,10 +430,16 @@
         const snap = await roomsCol.doc(r.id).get();
         if (snap.exists) {
           const data = snap.data() || {};
+          const direct = data.type === 'direct' || r.direct === true;
+          const otherUser = direct
+            ? ((data.users || []).find(u => u !== currentUser) || r.otherUser || r.name || '')
+            : null;
           return {
             id: r.id,
-            name: data.name || r.name || r.id,
-            creator: data.creator || r.creator || null
+            name: direct ? otherUser : (data.name || r.name || r.id),
+            creator: data.creator || r.creator || null,
+            direct: direct,
+            otherUser: otherUser
           };
         }
       } catch (e) {}
@@ -419,8 +456,10 @@
     if (roomsUnsub) { roomsUnsub(); roomsUnsub = null; }
     roomsUnsub = accountsCol.doc(currentUser).onSnapshot(async (snap) => {
       const rawRooms = (snap.exists && snap.data().rooms) || [];
+      contactsCache = (snap.exists && snap.data().contacts) || [];
       myRoomsCache = await refreshRoomMetadata(rawRooms);
       renderRoomList();
+      renderContacts();
       resubscribeNotifyListeners();
     }, () => {});
   }
@@ -491,6 +530,127 @@
     notificationsEnabled = true;
   }
   updateNotifBtn();
+
+  function directRoomId(a, b) {
+    const pair = [a, b].sort();
+    let h = 2166136261;
+    const raw = pair[0] + '\\u0000' + pair[1];
+    for (let i = 0; i < raw.length; i++) {
+      h ^= raw.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return 'direct_' + (h >>> 0).toString(36);
+  }
+
+  async function addDirectRoom(otherUser) {
+    const id = directRoomId(currentUser, otherUser);
+    const roomRef = roomsCol.doc(id);
+    const snap = await roomRef.get();
+
+    if (!snap.exists) {
+      await roomRef.set({
+        type: 'direct',
+        users: [currentUser, otherUser].sort(),
+        createdAt: FieldValue.serverTimestamp()
+      });
+    } else {
+      const data = snap.data() || {};
+      const users = Array.isArray(data.users) ? data.users : [];
+      if (data.type !== 'direct' || users.length !== 2 ||
+          !users.includes(currentUser) || !users.includes(otherUser)) {
+        throw new Error('That direct Wire already has incompatible data.');
+      }
+    }
+
+    const myEntry = { id: id, name: otherUser, creator: null, direct: true, otherUser: otherUser };
+    await accountsCol.doc(currentUser).update({
+      rooms: FieldValue.arrayUnion(myEntry)
+    });
+
+    const otherEntry = { id: id, name: currentUser, creator: null, direct: true, otherUser: currentUser };
+    await accountsCol.doc(otherUser).update({
+      rooms: FieldValue.arrayUnion(otherEntry)
+    });
+
+    return id;
+  }
+
+  async function addContact() {
+    const inputEl = document.getElementById('contactUsernameInput');
+    const errorEl = document.getElementById('contactError');
+    const username = (inputEl.value || '').trim();
+    errorEl.textContent = '';
+
+    if (!username) {
+      errorEl.textContent = 'Enter a username first.';
+      return;
+    }
+    if (username === currentUser) {
+      errorEl.textContent = 'You cannot add yourself.';
+      return;
+    }
+    if (contactsCache.includes(username)) {
+      const existingRoom = getMyRooms().find(r => r.direct && r.otherUser === username);
+      if (existingRoom) {
+        enterChatView(existingRoom.id, username);
+        return;
+      }
+      errorEl.textContent = 'That account is already in your contacts.';
+      return;
+    }
+
+    const addBtn = document.getElementById('addContactBtn');
+    addBtn.disabled = true;
+    addBtn.textContent = 'Adding…';
+
+    try {
+      const targetSnap = await accountsCol.doc(username).get();
+      if (!targetSnap.exists) {
+        errorEl.textContent = 'No account with that username was found.';
+        return;
+      }
+
+      const directId = await addDirectRoom(username);
+      await accountsCol.doc(currentUser).update({
+        contacts: FieldValue.arrayUnion(username)
+      });
+
+      inputEl.value = '';
+      errorEl.textContent = '';
+      enterChatView(directId, username);
+    } catch (e) {
+      console.error('contact/direct Wire creation failed', e);
+      errorEl.textContent = 'Could not create the direct Wire. Check your connection and try again.';
+    } finally {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add';
+    }
+  }
+
+  function renderContacts() {
+    const list = document.getElementById('contactsList');
+    list.innerHTML = '';
+    getContacts().forEach(username => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'contact-chip';
+      chip.textContent = username;
+      chip.addEventListener('click', async () => {
+        try {
+          const id = await addDirectRoom(username);
+          enterChatView(id, username);
+        } catch (e) {
+          document.getElementById('contactError').textContent = 'Could not open that direct Wire.';
+        }
+      });
+      list.appendChild(chip);
+    });
+  }
+
+  document.getElementById('addContactBtn').addEventListener('click', addContact);
+  document.getElementById('contactUsernameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addContact();
+  });
 
   async function addRoomToMyList(topic, name, creator) {
     if (myRoomsCache.some(r => r.id === topic)) return;
@@ -573,15 +733,15 @@
     } else {
       rooms.forEach(r => {
         const card = document.createElement('div');
-        card.className = 'roomcard';
+        card.className = 'roomcard' + (r.direct ? ' direct-room' : '');
         card.innerHTML = '<div><div class="name"></div><div class="sub"></div></div><div class="roomcard-actions"><div class="iconbtn open-room-btn" style="pointer-events:none;">open →</div></div>';
-        card.querySelector('.name').textContent = r.name;
-        card.querySelector('.sub').textContent = r.id;
+        card.querySelector('.name').textContent = r.direct ? r.otherUser : r.name;
+        card.querySelector('.sub').textContent = r.direct ? 'Direct Wire' : r.id;
 
         // The room document is the source of truth for ownership. This also
         // fixes rooms whose account-list entry was created before the creator
         // field was added.
-        if (r.creator === currentUser || currentUser === 'DuckedOUT99') {
+        if (!r.direct && (r.creator === currentUser || currentUser === 'DuckedOUT99')) {
           const deleteBtn = document.createElement('button');
           deleteBtn.className = 'iconbtn';
           deleteBtn.textContent = 'delete';
@@ -1393,4 +1553,3 @@
 </script>
 </body>
 </html>
-

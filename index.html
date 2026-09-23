@@ -226,6 +226,27 @@
     font-family: inherit; font-size: 14px; color: var(--ink); cursor: pointer;
   }
   .attach-menu-item:hover { background: var(--bg); }
+  .poll-card { min-width: 250px; max-width: 360px; }
+  .poll-question { font-size: 15px; font-weight: 600; margin-bottom: 10px; white-space: pre-wrap; }
+  .poll-option { position: relative; width: 100%; border: 1px solid var(--line); background: transparent; color: inherit; border-radius: 10px; padding: 9px 10px; margin-top: 6px; text-align: left; cursor: pointer; overflow: hidden; }
+  .poll-option:hover { border-color: var(--accent); }
+  .poll-option-bar { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .10; pointer-events: none; }
+  .poll-option-content { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .poll-option-label { overflow-wrap: anywhere; }
+  .poll-option-count { font-family: ui-monospace, monospace; font-size: 10px; color: var(--ink-dim); flex-shrink: 0; }
+  .poll-voted { border-color: var(--accent); }
+  .poll-footer { margin-top: 8px; font-family: ui-monospace, monospace; font-size: 10px; color: var(--ink-dim); }
+  .poll-modal-backdrop { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.28); }
+  .poll-modal-backdrop.open { display: flex; }
+  .poll-modal { width: min(420px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .poll-modal h3 { margin: 0 0 12px; font-size: 17px; }
+  .poll-modal input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); font: inherit; outline: none; margin-bottom: 8px; }
+  .poll-modal input:focus { border-color: var(--accent); }
+  .poll-options-label { font-family: ui-monospace, monospace; font-size: 10px; color: var(--ink-dim); text-transform: uppercase; margin: 8px 0 6px 2px; }
+  .poll-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .poll-modal-actions button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-family: ui-monospace, monospace; font-size: 11px; padding: 8px 12px; border-radius: 10px; cursor: pointer; }
+  .poll-modal-actions .poll-create-btn { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .poll-error { min-height: 1em; color: var(--accent); font-size: 11px; }
   .bubble.imgbubble { padding: 4px; max-width: 68%; }
   .bubble.imgbubble img {
     display: block; width: 100%; max-height: 320px; object-fit: cover;
@@ -339,6 +360,7 @@
         <div class="attach-menu" id="attachMenu">
           <button type="button" class="attach-menu-item" id="attachImageOption">🖼 Image</button>
           <button type="button" class="attach-menu-item" id="attachAudioOption">🎵 Audio / voice clip</button>
+          <button type="button" class="attach-menu-item" id="attachPollOption">📊 Poll</button>
         </div>
       </div>
       <input type="file" id="imageInput" accept="image/*" style="display:none;">
@@ -347,6 +369,21 @@
       <button class="send" id="send" type="submit">send</button>
     </form>
   </footer>
+</div>
+
+<div class="poll-modal-backdrop" id="pollModal">
+  <div class="poll-modal" role="dialog" aria-modal="true" aria-labelledby="pollModalTitle">
+    <h3 id="pollModalTitle">Create a poll</h3>
+    <input id="pollQuestionInput" type="text" maxlength="300" placeholder="Ask a question…" autocomplete="off">
+    <div class="poll-options-label">Options</div>
+    <div id="pollOptionInputs"></div>
+    <button type="button" class="attach-menu-item" id="pollAddOptionBtn">+ Add option</button>
+    <div class="poll-error" id="pollError"></div>
+    <div class="poll-modal-actions">
+      <button type="button" id="pollCancelBtn">Cancel</button>
+      <button type="button" class="poll-create-btn" id="pollCreateBtn">Create poll</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1090,6 +1127,34 @@
     if (renderedIds.has(id)) {
       messageData.set(id, data);
       const existing = messageNodes.get(id);
+
+      // Polls contain their live vote counts in the message document.
+      // Rebuild the poll bubble when Firestore sends a modified snapshot so
+      // changing a vote is reflected immediately without reopening the Wire.
+      if (data.type === 'poll' && existing) {
+        // Rebuild the poll in place so the live vote update does not leave
+        // the old timestamp/meta row behind or move the poll to the bottom.
+        const marker = document.createComment('poll-update');
+        existing.before(marker);
+        const oldMeta = existing.nextElementSibling;
+        if (oldMeta && oldMeta.classList.contains('meta')) oldMeta.remove();
+        existing.remove();
+        messageNodes.delete(id);
+        renderedIds.delete(id);
+        renderMessageDoc(id, data);
+
+        const newRow = messageNodes.get(id);
+        if (newRow) {
+          const newMeta = newRow.nextElementSibling;
+          marker.replaceWith(newRow);
+          if (newMeta && newMeta.classList.contains('meta')) newRow.after(newMeta);
+        } else {
+          marker.remove();
+        }
+        updatePinBar();
+        return;
+      }
+
       if (existing) {
         existing.classList.toggle('pinned', !!data.pinned);
       }
@@ -1131,6 +1196,50 @@
         window.open(data.imageData, '_blank');
       });
       bubble.appendChild(img);
+    } else if (data.type === 'poll') {
+      bubble.className = 'bubble poll-card';
+      const question = document.createElement('div');
+      question.className = 'poll-question';
+      question.textContent = data.question || 'Poll';
+      bubble.appendChild(question);
+
+      const options = Array.isArray(data.options) ? data.options : [];
+      const votes = data.votes && typeof data.votes === 'object' ? data.votes : {};
+      let totalVotes = 0;
+      options.forEach((_, index) => { totalVotes += Array.isArray(votes[index]) ? votes[index].length : 0; });
+      const myVote = options.findIndex((_, index) => Array.isArray(votes[index]) && votes[index].includes(currentUser));
+
+      options.forEach((label, index) => {
+        const voters = Array.isArray(votes[index]) ? votes[index] : [];
+        const count = voters.length;
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'poll-option' + (myVote === index ? ' poll-voted' : '');
+        const bar = document.createElement('div');
+        bar.className = 'poll-option-bar';
+        bar.style.width = (totalVotes ? Math.round((count / totalVotes) * 100) : 0) + '%';
+        option.appendChild(bar);
+        const content = document.createElement('div');
+        content.className = 'poll-option-content';
+        const text = document.createElement('span');
+        text.className = 'poll-option-label';
+        text.textContent = label;
+        const countEl = document.createElement('span');
+        countEl.className = 'poll-option-count';
+        countEl.textContent = String(count);
+        content.appendChild(text);
+        content.appendChild(countEl);
+        option.appendChild(content);
+        option.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!pinMode) voteInPoll(id, index);
+        });
+        bubble.appendChild(option);
+      });
+      const footer = document.createElement('div');
+      footer.className = 'poll-footer';
+      footer.textContent = totalVotes + (totalVotes === 1 ? ' vote' : ' votes') + (myVote >= 0 ? ' · your vote is selected' : '');
+      bubble.appendChild(footer);
     } else if (data.type === 'audio') {
       bubble.className = 'bubble audiobubble';
       const label = document.createElement('div');
@@ -1187,6 +1296,105 @@
 
   function setStatus(text) { statusEl.textContent = text; }
 
+  function updatePollOptionVisibility() {
+    const option = document.getElementById('attachPollOption');
+    if (option) option.style.display = isCurrentDirectWire() ? 'none' : '';
+  }
+
+  function isCurrentDirectWire() {
+    const room = getMyRooms().find(r => r.id === topic);
+    return !!(room && room.direct);
+  }
+
+  let pollOptionCount = 2;
+  function resetPollModal() {
+    document.getElementById('pollQuestionInput').value = '';
+    const list = document.getElementById('pollOptionInputs');
+    list.innerHTML = '';
+    pollOptionCount = 0;
+    addPollOptionInput();
+    addPollOptionInput();
+    document.getElementById('pollError').textContent = '';
+  }
+
+  function addPollOptionInput() {
+    if (pollOptionCount >= 6) return;
+    pollOptionCount++;
+    const inputEl = document.createElement('input');
+    inputEl.type = 'text';
+    inputEl.maxLength = 120;
+    inputEl.placeholder = 'Option ' + pollOptionCount;
+    inputEl.className = 'poll-option-input';
+    document.getElementById('pollOptionInputs').appendChild(inputEl);
+  }
+
+  function openPollModal() {
+    if (isCurrentDirectWire()) return;
+    resetPollModal();
+    document.getElementById('pollModal').classList.add('open');
+    document.getElementById('pollQuestionInput').focus();
+  }
+
+  function closePollModal() {
+    document.getElementById('pollModal').classList.remove('open');
+  }
+
+  async function createPoll() {
+    const errorEl = document.getElementById('pollError');
+    const question = document.getElementById('pollQuestionInput').value.trim();
+    const options = Array.from(document.querySelectorAll('.poll-option-input'))
+      .map(el => el.value.trim()).filter(Boolean);
+    errorEl.textContent = '';
+    if (!question) { errorEl.textContent = 'Enter a question.'; return; }
+    if (options.length < 2) { errorEl.textContent = 'Add at least two options.'; return; }
+    if (isCurrentDirectWire()) { closePollModal(); return; }
+
+    const btn = document.getElementById('pollCreateBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creating…';
+    try {
+      const votes = {};
+      options.forEach((_, i) => { votes[i] = []; });
+      await roomsCol.doc(topic).collection('messages').add({
+        type: 'poll',
+        sender: currentUser,
+        question: question,
+        options: options,
+        votes: votes,
+        ts: FieldValue.serverTimestamp()
+      });
+      closePollModal();
+    } catch (e) {
+      console.error('poll creation failed', e);
+      errorEl.textContent = 'Could not create the poll.';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Create poll';
+    }
+  }
+
+  async function voteInPoll(messageId, optionIndex) {
+    const msgRef = roomsCol.doc(topic).collection('messages').doc(messageId);
+    try {
+      await firestoreDb.runTransaction(async (transaction) => {
+        const snap = await transaction.get(msgRef);
+        if (!snap.exists) return;
+        const data = snap.data() || {};
+        const options = Array.isArray(data.options) ? data.options : [];
+        if (optionIndex < 0 || optionIndex >= options.length) return;
+        const votes = data.votes && typeof data.votes === 'object' ? data.votes : {};
+        const nextVotes = {};
+        options.forEach((_, i) => {
+          nextVotes[i] = Array.isArray(votes[i]) ? votes[i].filter(u => u !== currentUser) : [];
+        });
+        nextVotes[optionIndex].push(currentUser);
+        transaction.update(msgRef, { votes: nextVotes });
+      });
+    } catch (e) {
+      console.error('poll vote failed', e);
+    }
+  }
+
   async function sendMessage(text) {
     sendBtn.disabled = true;
     try {
@@ -1224,6 +1432,15 @@
     attachMenu.classList.remove('open');
     audioInput.click();
   });
+  document.getElementById('attachPollOption').addEventListener('click', () => {
+    attachMenu.classList.remove('open');
+    openPollModal();
+  });
+  document.getElementById('pollAddOptionBtn').addEventListener('click', addPollOptionInput);
+  document.getElementById('pollCancelBtn').addEventListener('click', closePollModal);
+  document.getElementById('pollCreateBtn').addEventListener('click', createPoll);
+  document.getElementById('pollModal').addEventListener('click', (e) => { if (e.target.id === 'pollModal') closePollModal(); });
+  document.getElementById('pollQuestionInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
 
   function readFileAsImage(file) {
     return new Promise((resolve, reject) => {
@@ -1563,6 +1780,7 @@
     if (msgsUnsub) { msgsUnsub(); msgsUnsub = null; }
     topic = t;
     roomName = name || t;
+    updatePollOptionVisibility();
     location.hash = topic;
     renderedIds.clear();
     messageData.clear();
